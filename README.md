@@ -1,2 +1,2 @@
 # diffroomacoustics
-A Differentiable Room Acoustics Simulator
+A Differentiable Room Acoustics Simulator written in PyTorch
