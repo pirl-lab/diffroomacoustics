@@ -35,7 +35,7 @@ def get_rir(room_dims, room_mat, src_loc, mic_loc, order=REF_ORDER, srate=SRATE,
         impulse_func = lambda t : torch.exp(-1.0 * torch.square(t / sigma)) * (t >= 0.0)
     timestamp = torch.arange(rir_len) / srate
     timestamp = timestamp.view((1,)*len(batch_dims) + timestamp.shape)
-    direct_delay = torch.sqrt(torch.sum(torch.square(src_loc - mic_loc), dim=-1, keepdims=True)) / mach
+    direct_delay = torch.sqrt(torch.sum(torch.square(src_loc - mic_loc), dim=-1, keepdim=True)) / mach
     if (normalize):
         delay_offset = -1.0 * direct_delay
     else:
