@@ -92,7 +92,7 @@ def get_rir(room_dims, room_mat, src_loc, mic_loc, order=REF_ORDER, srate=SRATE,
         tail_offset = 0.0 if normalize else (-1.0 * direct_delay)
         max_order_amp = torch.stack(max_order_amp, dim=-1)
         max_order_delay = torch.stack(max_order_delay, dim=-1)
-        max_order_decay = torch.log(torch.abs(max_order_amp)) / max_order_delay
+        max_order_decay = torch.log(torch.abs(max_order_amp) + torch.finfo(torch.float32).eps) / max_order_delay
         tail_env = tail_func((timestamp + tail_offset)[...,None], max_order_decay, max_order_delay * (order + 1.0) / order)
         tail = torch.sum(0.5 * torch.randn(timestamp.shape + tail_env.shape[-1:]) * tail_env / max(6.0, order), dim=-1)
         rir = rir + tail
