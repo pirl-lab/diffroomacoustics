@@ -21,11 +21,14 @@ from defaults import *
 # mach : speed of sound
 # attenuation : acoustic attenuation constant in air, modeled as per https://ccrma.stanford.edu/~jos/pasp/Air_Absorption.html
 # normalize : when set to True, chop off the part of the rir before the direct path
+# normalize_mode : when set to 'batch', will preserve the relative direct path delays between output RIRs
+#                  i.e. will chop off only the amount before the earliest direct path arrival;
+#                  otherwise will normalize on a per-sample basis
 # eval: when set to True, generates unit impulses for the sake of rendering audio, otherwise uses a half-gaussian approximation for smoother gradients
 # render_tail : when set to True, render an approximate tail
 # sigma : float for width of gaussians to represent impulse function (in seconds), setting this value to 0 is equivalent to providing eval=True
 def get_rir(room_dims, room_mat, src_loc, mic_loc, order=REF_ORDER, srate=SRATE, rir_len=RIR_LEN, mach=MACH, attenuation=ATTENUATION,
-            normalize=False, eval=False, render_tail=True, sigma=IMPULSE_SIGMA):
+            normalize=False, normalize_mode='each', eval=False, render_tail=True, sigma=IMPULSE_SIGMA):
     batch_dims = max(room_dims.shape[:-1], room_mat.shape[:-2], src_loc.shape[:-1], mic_loc.shape[:-1])
     # construct RIR as a sum of delayed and scaled impulses
     if (eval or abs(sigma) <= 0.000001):
@@ -38,7 +41,10 @@ def get_rir(room_dims, room_mat, src_loc, mic_loc, order=REF_ORDER, srate=SRATE,
     timestamp = timestamp.view((1,)*len(batch_dims) + timestamp.shape)
     direct_delay = torch.sqrt(torch.sum(torch.square(src_loc - mic_loc), dim=-1, keepdim=True)) / mach
     if (normalize):
-        delay_offset = -1.0 * direct_delay
+        if (normalize_mode == 'batch'):
+            delay_offset = -1.0 * torch.min(direct_delay)
+        else:
+            delay_offset = -1.0 * direct_delay
     else:
         delay_offset = 0.0
     # precompute lattice values (coordinates, reflectivity)
@@ -118,14 +124,15 @@ def compute_path_t(src_loc, mic_loc, attenuation):
 #    mic_loc   : microphone location(s) with shape ending in (3, ), representing x, y, z coords
 # Other arguments:
 # options: dict consisting of the following options that can be specified
-#    order       : order of reflections to compute via ISM
-#    srate       : sample rate
-#    rir_len     : length of impulse response to output
-#    mach        : speed of sound
-#    attenuation : acoustic attenuation constant in air, modeled as per https://ccrma.stanford.edu/~jos/pasp/Air_Absorption.html
-#    normalize   : when set to True, chop off the part of the rir before the direct path
-#    render_tail : when set to True, render an approximate tail
-#    sigma       : float for width of gaussians to represent impulse function (in seconds) during gradient computation
+#    order          : order of reflections to compute via ISM
+#    srate          : sample rate
+#    rir_len        : length of impulse response to output
+#    mach           : speed of sound
+#    attenuation    : acoustic attenuation constant in air, modeled as per https://ccrma.stanford.edu/~jos/pasp/Air_Absorption.html
+#    normalize      : when set to True, chop off the part of the rir before the direct path
+#    normalize_mode : when set to 'batch', will preserve the relative direct path delays between output RIRs
+#    render_tail    : when set to True, render an approximate tail
+#    sigma          : float for width of gaussians to represent impulse function (in seconds) during gradient computation
 class SmoothGradISM(autograd.Function):
     @staticmethod
     def forward(ctx, input, options):
@@ -136,6 +143,7 @@ class SmoothGradISM(autograd.Function):
         mach = options['mach'] if ('mach' in options) else MACH
         attenuation = options['attenuation'] if ('attenuation' in options) else ATTENUATION
         normalize = options['normalize'] if ('normalize' in options) else False
+        normalize_mode = options['normalize_mode'] if ('normalize_mode' in options) else 'each'
         render_tail = options['render_tail'] if ('render_tail' in options) else True
         sigma = options['sigma'] if ('sigma' in options) else IMPULSE_SIGMA
         with torch.enable_grad():
@@ -153,7 +161,10 @@ class SmoothGradISM(autograd.Function):
             # compute delay compensation for direct path
             direct_delay = torch.sqrt(torch.sum(torch.square(src_loc - mic_loc), dim=-1, keepdim=True)) / mach
             if (normalize):
-                delay_offset = -1.0 * direct_delay
+                if (normalize_mode == 'batch'):
+                    delay_offset = -1.0 * torch.min(direct_delay)
+                else:
+                    delay_offset = -1.0 * direct_delay
             else:
                 delay_offset = 0.0
             # precompute lattice values (coordinates, reflectivity)
