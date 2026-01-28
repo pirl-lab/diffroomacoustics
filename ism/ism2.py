@@ -142,7 +142,7 @@ def get_rir(room_dims, room_mat, src_loc, mic_loc, order=REF_ORDER, srate=SRATE,
         min_dist = mach * torch.sum(max_order_delay * torch.softmax(-1.0 * max_order_delay, dim=-1), dim=-1) # use delay of the last image sources as starting point
         max_dist = torch.clamp(lat_dist_avg * tail_order, min=eps) # average distance of images at max depth
         # inverse sample from quadratic distribution on (order_ratio, 1.0)
-        tail_img_r = torch.pow(torch.rand(room_dims.shape[:-1] + (tail_samples,)) * (1.0 - order_ratio**3) + order_ratio**3, 1/3)
+        tail_img_r = torch.pow(torch.rand(room_dims.shape[:-1] + (tail_samples,), device=room_dims.device) * (1.0 - order_ratio**3) + order_ratio**3, 1/3)
         tail_img_r = min_dist + (tail_img_r - order_ratio) / (1.0 - order_ratio) * (max_dist - min_dist) # rescale to (min_dist, max_dist)
         tail_ratio = tail_img_r / torch.clamp(direct_dist, min=eps)
         tail_bounces = order + torch.square((tail_img_r - min_dist) / (max_dist - min_dist)) * tail_depth
