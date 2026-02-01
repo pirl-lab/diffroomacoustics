@@ -41,6 +41,9 @@ def get_rir(room_dims, room_mat, src_loc, mic_loc, order=REF_ORDER, srate=SRATE,
     # shape check room_mat
     assert ((room_mat.shape[-2:] == (3, 2)) or (room_mat.shape[-3:-1] == (3, 2))), "invalid room_mat shape"
     multifreq = (room_mat.shape[-3:-1] == (3, 2))
+    # zero-padding to ensure effects of circular shift with sinc interpolation are mitigated to below -60dB
+    rir_len_out = rir_len
+    rir_len = rir_len + 1024
     # construct RIR as a sum of delayed and scaled impulse responses
     rfft_len = rir_len // 2 + 1
     impulse = torch.ones(rfft_len, requires_grad=False, device=room_dims.device)
@@ -57,7 +60,7 @@ def get_rir(room_dims, room_mat, src_loc, mic_loc, order=REF_ORDER, srate=SRATE,
             # compute min-phase wall filters
             if (mat_freqs is None):
                 mat_freqs = torch.arange(room_mat.shape[-1], requires_grad=False, device=room_mat.device) * srate / (2 * (room_mat.shape[-1] - 1))
-            wall_f_len = min(int(0.1 * rir_len), wall_filt_len)
+            wall_f_len = min(int(0.1 * rir_len_out), wall_filt_len)
             wall_rfft_len = wall_f_len // 2 + 1
             dft_freqs = torch.arange(wall_rfft_len, requires_grad=False, device=room_mat.device) * srate / wall_f_len
             dft_freqs_ = dft_freqs.reshape((1,)*len(room_mat.shape[:-1]) + dft_freqs.shape).expand(room_mat.shape[:-1] + (-1,))
@@ -76,7 +79,7 @@ def get_rir(room_dims, room_mat, src_loc, mic_loc, order=REF_ORDER, srate=SRATE,
     else:
         wall_f_len = 1
         room_mat_ = room_mat[...,None]
-    max_delay = (rir_len - wall_f_len - 1) / srate # prevent circular shifting
+    max_delay = (rir_len_out - wall_f_len - 1) / srate # prevent circular shifting
     direct_dist = torch.sqrt(torch.sum(torch.square(src_loc - mic_loc), dim=-1, keepdim=True))
     if (normalize):
         if (normalize_mode == 'batch'):
@@ -166,7 +169,7 @@ def get_rir(room_dims, room_mat, src_loc, mic_loc, order=REF_ORDER, srate=SRATE,
         a = torch.tensor(a, device=rir.device, dtype=rir.dtype)
         b = torch.tensor(b, device=rir.device, dtype=rir.dtype)
         rir = lfilter(rir, a, b)
-    return rir
+    return rir[...,:rir_len_out]
 
 # Precompute image-source lattice coordinates for a set location and shoebox room geometry
 # Torch tensor arguments (gradient computation available; all arguments can be batched so long as the batch shapes are broadcastable with each other):
@@ -202,13 +205,16 @@ def lattice_coord_shoebox(room_dims, query_loc, order=REF_ORDER):
 def lattice_ref_shoebox(room_mat, order=REF_ORDER, srate=SRATE, rir_len=RIR_LEN, mat_freqs=None, wall_filt_len=1024):
     # shape check room_mat
     assert ((room_mat.shape[-2:] == (3, 2)) or (room_mat.shape[-3:-1] == (3, 2))), "invalid room_mat shape"
+    # zero-padding to ensure effects of circular shift with sinc interpolation are mitigated to below -60dB
+    rir_len_out = rir_len
+    rir_len = rir_len + 1024
     multifreq = (room_mat.shape[-3:-1] == (3, 2))
     if (multifreq):
         if (room_mat.shape[-1] > 1):
             # compute min-phase wall filters
             if (mat_freqs is None):
                 mat_freqs = torch.arange(room_mat.shape[-1], requires_grad=False, device=room_mat.device) * srate / (2 * (room_mat.shape[-1] - 1))
-            wall_f_len = min(int(0.1 * rir_len), wall_filt_len)
+            wall_f_len = min(int(0.1 * rir_len_out), wall_filt_len)
             wall_rfft_len = wall_f_len // 2 + 1
             dft_freqs = torch.arange(wall_rfft_len, requires_grad=False, device=room_mat.device) * srate / wall_f_len
             dft_freqs = dft_freqs.reshape((1,)*len(room_mat.shape[:-1]) + dft_freqs.shape).expand(room_mat.shape[:-1] + (-1,))
@@ -251,9 +257,12 @@ def lattice_ref_shoebox(room_mat, order=REF_ORDER, srate=SRATE, rir_len=RIR_LEN,
 # eps : machine epsilon used for numerical stability
 def get_rir_lattice(lattice_coord, lattice_ref, eval_loc, order=REF_ORDER, srate=SRATE, rir_len=RIR_LEN, wall_filt_len=1024, mach=MACH, attenuation=ATTENUATION,
                     normalize=False, normalize_mode='each', image_sigma=0, hpf=True, eps=EPS):
+    # zero-padding to ensure effects of circular shift with sinc interpolation are mitigated to below -60dB
+    rir_len_out = rir_len
+    rir_len = rir_len + 1024
     # construct RIR as a sum of delayed and scaled impulse responses
-    wall_f_len = lattice_ref.shape[-1] if (lattice_ref.shape[-1] == 1) else min(int(0.1 * rir_len), wall_filt_len)
-    max_delay = (rir_len - wall_f_len - 1) / srate # prevent circular shifting
+    wall_f_len = lattice_ref.shape[-1] if (lattice_ref.shape[-1] == 1) else min(int(0.1 * rir_len_out), wall_filt_len)
+    max_delay = (rir_len_out - wall_f_len - 1) / srate # prevent circular shifting
     rfft_len = rir_len // 2 + 1
     impulse = torch.ones(rfft_len, requires_grad=False, device=lattice_coord.device)
     omega = (-2.0j * torch.pi * srate / rir_len) * torch.arange(rfft_len, requires_grad=False, device=lattice_coord.device)
@@ -302,7 +311,7 @@ def get_rir_lattice(lattice_coord, lattice_ref, eval_loc, order=REF_ORDER, srate
         a = torch.tensor(a, device=rir.device, dtype=rir.dtype)
         b = torch.tensor(b, device=rir.device, dtype=rir.dtype)
         rir = lfilter(rir, a, b)
-    return rir
+    return rir[...,:rir_len_out]
 
 # Convenience function for computing the delay and attenuation corresponding to a given sound path
 def compute_path_t(src_loc, mic_loc, mach, attenuation, keepdim=True):
