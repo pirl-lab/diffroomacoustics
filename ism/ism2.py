@@ -19,31 +19,35 @@ from defaults import *
 # order : order of reflections to compute via ISM
 # srate : sample rate
 # rir_len : length of impulse response to output
+# buffer_len : length of zero-padding buffer used to mitigate artifacts of circular shifting with sinc interpolation
+#              when causal is False, the RIR will be delayed by buffer_len samples
 # mat_freqs : ascending frequencies with shape (L, ) corresponding to the last dimension of room_mat (if given)
 #             uses the linear frequencies represented by the even 2 * (L - 1) length DFT by default
 # wall_filt_len : when mat_freqs is provided, the wall filter is computed via linear interpolation to DFT frequencies of length wall_filt_len
 #                 if greater than 0.1 * rir_len is provided, the latter is used instead
 # mach : speed of sound
 # attenuation : acoustic attenuation constant in air, modeled as per https://ccrma.stanford.edu/~jos/pasp/Air_Absorption.html
-# normalize : when set to True, chop off the part of the rir before the direct path
-# normalize_mode : when set to 'batch', will preserve the relative direct path delays between output RIRs
-#                  i.e. will chop off only the amount before the earliest direct path arrival;
+# normalize : when set to True, remove the part of the RIR before the direct path
+# normalize_amp : when set to True, normalize the amplitude response by the direct path amplitude
+# normalize_mode : when set to 'batch', will preserve the relative transfer function between output RIRs
 #                  otherwise will normalize on a per-sample basis
 # image_sigma : when set to a positive value, image source positions will be perturbed via a zero-mean uniform distribution with image_sigma range in all dimensions
-# hpf : when true, use a 10 Hz highpass filter to remove DC bias from RIR
+# hpf : when True, use a 10 Hz highpass filter to remove DC bias from RIR
+# causal : when True, the delay of size buffer_len is removed from the RIR
 # render_tail : when set to True, render an approximate tail using a method based on https://github.com/tencent-ailab/FRA-RIR
 # tail_samples : number of impulse samples used to create the approximate tail
 # tail_depth : depth (order) to compute for the tail
 # eps : machine epsilon used for numerical stability
-def get_rir(room_dims, room_mat, src_loc, mic_loc, order=REF_ORDER, srate=SRATE, rir_len=RIR_LEN, mat_freqs=None, wall_filt_len=1024,
-            mach=MACH, attenuation=ATTENUATION, normalize=False, normalize_mode='each', image_sigma=0, hpf=True,
-            render_tail=True, tail_samples=1024, tail_depth=15, eps=EPS):
+def get_rir(room_dims, room_mat, src_loc, mic_loc,
+            order=REF_ORDER, srate=SRATE, rir_len=RIR_LEN, buffer_len=1024, mat_freqs=None, wall_filt_len=1024,
+            mach=MACH, attenuation=ATTENUATION, normalize=False, normalize_amp=True, normalize_mode='each', image_sigma=0,
+            hpf=True, causal=True, render_tail=True, tail_samples=1024, tail_depth=15, eps=EPS):
     # shape check room_mat
     assert ((room_mat.shape[-2:] == (3, 2)) or (room_mat.shape[-3:-1] == (3, 2))), "invalid room_mat shape"
     multifreq = (room_mat.shape[-3:-1] == (3, 2))
     # zero-padding to ensure effects of circular shift with sinc interpolation are mitigated to below -60dB
     rir_len_out = rir_len
-    rir_len = rir_len + 1024
+    rir_len = rir_len + 2 * buffer_len
     # construct RIR as a sum of delayed and scaled impulse responses
     rfft_len = rir_len // 2 + 1
     impulse = torch.ones(rfft_len, requires_grad=False, device=room_dims.device)
@@ -81,17 +85,16 @@ def get_rir(room_dims, room_mat, src_loc, mic_loc, order=REF_ORDER, srate=SRATE,
         room_mat_ = room_mat[...,None]
     max_delay = (rir_len_out - wall_f_len - 1) / srate # prevent circular shifting
     direct_dist = torch.sqrt(torch.sum(torch.square(src_loc - mic_loc), dim=-1, keepdim=True))
-    if (normalize):
-        if (normalize_mode == 'batch'):
-            delay_offset = -1.0 * torch.min(direct_dist / mach)
-            dist_norm = torch.min(direct_dist)
-        else:
-            delay_offset = -1.0 * direct_dist / mach
-            dist_norm = direct_dist
+    if (normalize_mode == 'batch'):
+        delay_offset = (-1.0 * torch.min(direct_dist.detach() / mach)) if normalize else 0.0
+        dist_norm = torch.min(direct_dist.detach()) if normalize_amp else 1.0
     else:
-        delay_offset = 0.0
-        dist_norm = direct_dist
+        delay_offset = (-1.0 * direct_dist.detach() / mach) if normalize else 0.0
+        dist_norm = direct_dist.detach() if normalize_amp else 1.0
     dist_norm = torch.clamp(dist_norm, min=eps)
+    if (not causal):
+        delay_offset = delay_offset + buffer_len / srate
+        max_delay = max_delay + buffer_len / srate
     # precompute lattice values (coordinates, reflectivity)
     # shape of (order, 3, 2) for order max reflections, 3 dimensions, and 2 directions (negative, positive); computed independently in each dim
     lattice_d = 2.0 * torch.stack([0.5 * room_dims + src_loc, 0.5 * room_dims - src_loc], dim=-1) # per-dimension inter-cell lengths in the lattice
@@ -244,22 +247,27 @@ def lattice_ref_shoebox(room_mat, order=REF_ORDER, srate=SRATE, rir_len=RIR_LEN,
 # order : order of reflections to compute via ISM (must be at most the order of lattice_coord and lattice_ref)
 # srate : sample rate
 # rir_len : length of impulse response to output
+# buffer_len : length of zero-padding buffer used to mitigate artifacts of circular shifting with sinc interpolation
+#              when causal is False, the RIR will be delayed by buffer_len samples
 # wall_filt_len : when mat_freqs is provided, the wall filter is computed via linear interpolation to DFT frequencies of length wall_filt_len
 #                 if greater than 0.1 * rir_len is provided, the latter is used instead
 # mach : speed of sound
 # attenuation : acoustic attenuation constant in air, modeled as per https://ccrma.stanford.edu/~jos/pasp/Air_Absorption.html
-# normalize : when set to True, chop off the part of the rir before the direct path
-# normalize_mode : when set to 'batch', will preserve the relative direct path delays between output RIRs
-#                  i.e. will chop off only the amount before the earliest direct path arrival;
+# normalize : when set to True, remove the part of the RIR before the direct path
+# normalize_amp : when set to True, normalize the amplitude response by the direct path amplitude
+# normalize_mode : when set to 'batch', will preserve the relative transfer function between output RIRs
 #                  otherwise will normalize on a per-sample basis
 # image_sigma : when set to a positive value, image source positions will be perturbed via a zero-mean uniform distribution with image_sigma range in all dimensions
 # hpf : when true, use a 10 Hz highpass filter to remove DC bias from RIR
+# causal : when True, the delay of size buffer_len is removed from the RIR
 # eps : machine epsilon used for numerical stability
-def get_rir_lattice(lattice_coord, lattice_ref, eval_loc, order=REF_ORDER, srate=SRATE, rir_len=RIR_LEN, wall_filt_len=1024, mach=MACH, attenuation=ATTENUATION,
-                    normalize=False, normalize_mode='each', image_sigma=0, hpf=True, eps=EPS):
+def get_rir_lattice(lattice_coord, lattice_ref, eval_loc,
+                    order=REF_ORDER, srate=SRATE, rir_len=RIR_LEN, buffer_len=1024, wall_filt_len=1024,
+                    mach=MACH, attenuation=ATTENUATION, normalize=False, normalize_amp=True, normalize_mode='each',
+                    image_sigma=0, hpf=True, causal=True, eps=EPS):
     # zero-padding to ensure effects of circular shift with sinc interpolation are mitigated to below -60dB
     rir_len_out = rir_len
-    rir_len = rir_len + 1024
+    rir_len = rir_len + 2 * buffer_len
     # construct RIR as a sum of delayed and scaled impulse responses
     wall_f_len = lattice_ref.shape[-1] if (lattice_ref.shape[-1] == 1) else min(int(0.1 * rir_len_out), wall_filt_len)
     max_delay = (rir_len_out - wall_f_len - 1) / srate # prevent circular shifting
@@ -267,17 +275,16 @@ def get_rir_lattice(lattice_coord, lattice_ref, eval_loc, order=REF_ORDER, srate
     impulse = torch.ones(rfft_len, requires_grad=False, device=lattice_coord.device)
     omega = (-2.0j * torch.pi * srate / rir_len) * torch.arange(rfft_len, requires_grad=False, device=lattice_coord.device)
     direct_dist = torch.sqrt(torch.sum(torch.square(lattice_coord[...,0,:,0] - eval_loc), dim=-1, keepdim=True))
-    if (normalize):
-        if (normalize_mode == 'batch'):
-            delay_offset = -1.0 * torch.min(direct_dist / mach)
-            dist_norm = torch.min(direct_dist)
-        else:
-            delay_offset = -1.0 * direct_dist / mach
-            dist_norm = direct_dist
+    if (normalize_mode == 'batch'):
+        delay_offset = (-1.0 * torch.min(direct_dist.detach() / mach)) if normalize else 0.0
+        dist_norm = torch.min(direct_dist.detach()) if normalize_amp else 1.0
     else:
-        delay_offset = 0.0
-        dist_norm = direct_dist
+        delay_offset = (-1.0 * direct_dist.detach() / mach) if normalize else 0.0
+        dist_norm = direct_dist.detach() if normalize_amp else 1.0
     dist_norm = torch.clamp(dist_norm, min=eps)
+    if (not causal):
+        delay_offset = delay_offset + buffer_len / srate
+        max_delay = max_delay + buffer_len / srate
     # quadrant bits, for convenience in traversing lattice
     quadrant_b = np.array([[0, 0, 0, 0, 1, 1, 1, 1],
                            [0, 0, 1, 1, 0, 0, 1, 1],
@@ -390,7 +397,7 @@ def rt_eyring(room_dims, room_mat, return_mat_avg=False):
     room_face_a = compute_room_faces(room_dims)
     room_sa = 2.0 * torch.sum(room_face_a, dim=-1)
     if (multifreq):
-        room_mat_avg = torch.sum(room_mat * room_face_a[...,None,None], dim=(-3,-2)) / room_sa
+        room_mat_avg = torch.sum(room_mat * room_face_a[...,None,None], dim=(-3,-2)) / room_sa[...,None]
         rt = norris_eyring(room_vol[...,None], room_sa[...,None], room_mat_avg)
     else:
         room_mat_avg = torch.sum(room_mat * room_face_a[...,None], dim=(-2,-1)) / room_sa
